@@ -195,7 +195,7 @@ class AutoCaptionGenerator:
             # Escape special characters for FFmpeg filtergraph
             text = text.replace(':', '\\:')
             
-            # Caption style: centered on screen
+           # Caption style: centered on screen with shadow and bold text
             filter_str = (
                 f"drawtext=text='{text}'"
                 f":fontsize=h/25"
@@ -203,7 +203,8 @@ class AutoCaptionGenerator:
                 f":x=(w-text_w)/2"
                 f":y=(h-text_h)/2"  # Vertically and horizontally centered
                 f":enable='between(t,{start_time},{end_time})'"
-                f":box=1:boxcolor=black@0.5:boxborderw=5"  # Semi-transparent background box
+                f":shadowcolor=black:shadowx=2:shadowy=2"  # Black shadow offset
+                f":bold=1"  # Bold text
             )
             filters.append(filter_str)
         
@@ -417,6 +418,7 @@ def cleanup_old_files():
                     
                     # Remove job from memory
                     del jobs[job_id]
+
 
         except Exception as e:
             print(f"Error during cleanup: {e}")
