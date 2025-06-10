@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """
 Auto Caption Web App
-Flask-based web interface for video captioning
+Flask-based web interface for video captioning using AssemblyAI SDK
 """
 
 from flask import Flask, render_template, request, jsonify, send_file, url_for
-import requests
-import json
+import assemblyai as aai
 import time
 import subprocess
 import os
@@ -26,17 +25,19 @@ app.config['OUTPUT_FOLDER'] = 'outputs'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
 
-# Your AssemblyAI API key
-ASSEMBLYAI_API_KEY = "55b99db8c9804e31bb1d978f81766379"
+# Configure AssemblyAI SDK
+aai.settings.api_key = "55b99db8c9804e31bb1d978f81766379"
 
 # Store job status
 jobs = {}
 
 class AutoCaptionGenerator:
-    def __init__(self, api_key):
-        self.api_key = api_key
-        self.base_url = "https://api.assemblyai.com"
-        self.headers = {"authorization": api_key}
+    def __init__(self):
+        # Configure transcription settings
+        self.config = aai.TranscriptionConfig(
+            speech_model=aai.SpeechModel.best
+        )
+        self.transcriber = aai.Transcriber(config=self.config)
     
     def extract_audio(self, video_path, audio_path):
         """Extract audio from video using FFmpeg"""
@@ -71,110 +72,38 @@ class AutoCaptionGenerator:
             print(f"Unexpected error during audio extraction: {e}")
             return False
     
-    def upload_audio(self, audio_path):
-        """Upload audio file to AssemblyAI"""
-        print(f"Uploading audio file: {audio_path}")
-        print(f"File size: {os.path.getsize(audio_path)} bytes")
+    def transcribe_audio(self, audio_path, job_id):
+        """Transcribe audio using AssemblyAI SDK"""
+        print(f"Starting transcription for job {job_id}")
+        print(f"Audio file: {audio_path}")
         
         try:
-            with open(audio_path, "rb") as f:
-                response = requests.post(
-                    f"{self.base_url}/v2/upload",
-                    headers=self.headers,
-                    data=f,
-                    timeout=60  # 60 second timeout for upload
-                )
+            jobs[job_id]['status'] = 'uploading audio'
             
-            print(f"Upload response status: {response.status_code}")
+            # The SDK handles file upload automatically
+            transcript = self.transcriber.transcribe(audio_path)
             
-            if response.status_code == 200:
-                upload_url = response.json()["upload_url"]
-                print(f"Upload successful. URL: {upload_url}")
-                return upload_url
+            # Check if transcription was successful
+            if transcript.status == aai.TranscriptStatus.error:
+                error_msg = transcript.error or "Unknown transcription error"
+                print(f"Transcription error: {error_msg}")
+                jobs[job_id]['status'] = 'error'
+                jobs[job_id]['error'] = f"Transcription failed: {error_msg}"
+                return None
+            
+            if transcript.status == aai.TranscriptStatus.completed:
+                print("Transcription completed successfully")
+                return transcript
             else:
-                print(f"Upload failed: {response.status_code} - {response.text}")
+                print(f"Unexpected transcript status: {transcript.status}")
+                jobs[job_id]['status'] = 'error'
+                jobs[job_id]['error'] = f"Unexpected transcript status: {transcript.status}"
                 return None
                 
-        except requests.exceptions.RequestException as e:
-            print(f"Upload request error: {e}")
-            return None
         except Exception as e:
-            print(f"Unexpected upload error: {e}")
-            return None
-    
-    def transcribe_audio(self, audio_url, job_id):
-        """Transcribe audio with word-level timestamps"""
-        print(f"Starting transcription for job {job_id}")
-        print(f"Audio URL: {audio_url}")
-        
-        # 'word_timestamps' is deprecated; word details are included by default.
-        data = {
-            "audio_url": audio_url,
-            "speech_model": "universal",
-        }
-        
-        try:
-            response = requests.post(
-                f"{self.base_url}/v2/transcript",
-                json=data,
-                headers=self.headers,
-                timeout=30
-            )
-            
-            print(f"Transcription request status: {response.status_code}")
-            
-            if response.status_code != 200:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = f"API Error: {response.status_code} - {response.text}"
-                return None
-            
-            transcript_id = response.json()['id']
-            print(f"Transcript ID: {transcript_id}")
-            polling_endpoint = f"{self.base_url}/v2/transcript/{transcript_id}"
-            
-            # Poll for completion with timeout
-            max_polls = 120  # Maximum 6 minutes (120 * 3 seconds)
-            poll_count = 0
-            
-            while poll_count < max_polls:
-                try:
-                    result = requests.get(polling_endpoint, headers=self.headers, timeout=30).json()
-                    print(f"Poll {poll_count}: Status = {result['status']}")
-                    
-                    if result['status'] == 'completed':
-                        print("Transcription completed successfully")
-                        return result
-                    elif result['status'] == 'error':
-                        error_msg = result.get('error', 'Unknown transcription error')
-                        print(f"Transcription error: {error_msg}")
-                        jobs[job_id]['status'] = 'error'
-                        jobs[job_id]['error'] = f"Transcription failed: {error_msg}"
-                        return None
-                    else:
-                        jobs[job_id]['status'] = f"transcribing ({result['status']})"
-                        time.sleep(3)
-                        poll_count += 1
-                        
-                except requests.exceptions.RequestException as e:
-                    print(f"Request error during polling: {e}")
-                    jobs[job_id]['status'] = 'error'
-                    jobs[job_id]['error'] = f"Network error during transcription: {str(e)}"
-                    return None
-            
-            # Timeout reached
+            print(f"Transcription error: {e}")
             jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = 'Transcription timeout - please try with a shorter video'
-            return None
-            
-        except requests.exceptions.RequestException as e:
-            print(f"Request error: {e}")
-            jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = f"Network error: {str(e)}"
-            return None
-        except Exception as e:
-            print(f"Unexpected error: {e}")
-            jobs[job_id]['status'] = 'error'
-            jobs[job_id]['error'] = f"Unexpected error: {str(e)}"
+            jobs[job_id]['error'] = f"Transcription error: {str(e)}"
             return None
     
     def create_caption_filters(self, words):
@@ -185,26 +114,25 @@ class AutoCaptionGenerator:
         filters = []
         
         for word in words:
-            start_time = word['start'] / 1000.0
-            end_time = word['end'] / 1000.0
-            text = word['text'].upper()
+            start_time = word.start / 1000.0  # SDK provides milliseconds, convert to seconds
+            end_time = word.end / 1000.0
+            text = word.text.upper()
 
             # Remove unwanted punctuation (commas, periods) and quotes for clean display
             text = text.replace(',', '').replace('.', '').replace("'", "").replace('"', '')
 
             # Escape special characters for FFmpeg filtergraph
-            text = text.replace(':', '\\:')
+            text = text.replace(':', '\\:').replace("'", "\\'")
             
-           # Caption style: centered on screen with shadow and bold text
+            # Caption style: centered on screen with shadow (removed bold option)
             filter_str = (
                 f"drawtext=text='{text}'"
-                f":fontsize=h/25"
+                f":fontsize=h/20"  # Made font slightly larger since we can't use bold
                 f":fontcolor=white"
                 f":x=(w-text_w)/2"
                 f":y=(h-text_h)/2"  # Vertically and horizontally centered
                 f":enable='between(t,{start_time},{end_time})'"
-                f":shadowcolor=black:shadowx=2:shadowy=2"  # Black shadow offset
-                f":bold=1"  # Bold text
+                f":shadowcolor=black:shadowx=3:shadowy=3"  # Increased shadow for better visibility
             )
             filters.append(filter_str)
         
@@ -223,24 +151,31 @@ class AutoCaptionGenerator:
             jobs[job_id]['error'] = 'Could not create caption filters.'
             return False
 
-        cmd = [
-            'ffmpeg',
-            '-i', input_video,
-            '-vf', caption_filters,
-            '-c:a', 'copy',
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-y',
-            output_video
-        ]
-        
+        # Write filter to temporary file to avoid Windows command line length limits
+        filter_file = None
         try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as f:
+                f.write(caption_filters)
+                filter_file = f.name
+            
+            cmd = [
+                'ffmpeg',
+                '-i', input_video,
+                '-filter_complex_script', filter_file,
+                '-c:a', 'copy',
+                '-c:v', 'libx264',
+                '-preset', 'fast',
+                '-y',
+                output_video
+            ]
+            
             jobs[job_id]['status'] = 'rendering video'
             print("Running FFmpeg to generate captioned video...")
             # Set a timeout for the rendering process
             subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=600) # 10 minute timeout
             print("FFmpeg rendering completed.")
             return True
+            
         except subprocess.CalledProcessError as e:
             print(f"FFmpeg rendering error: {e}")
             print(f"FFmpeg stderr: {e.stderr}")
@@ -252,6 +187,13 @@ class AutoCaptionGenerator:
             jobs[job_id]['status'] = 'error'
             jobs[job_id]['error'] = 'Video rendering took too long. Please try a shorter video.'
             return False
+        finally:
+            # Clean up filter file
+            if filter_file and os.path.exists(filter_file):
+                try:
+                    os.unlink(filter_file)
+                except:
+                    pass
 
     def process_video(self, input_path, output_path, job_id):
         """Main function to process video and add captions"""
@@ -270,29 +212,20 @@ class AutoCaptionGenerator:
                 jobs[job_id]['error'] = 'Failed to extract audio'
                 return False
             
-            jobs[job_id]['status'] = 'uploading audio'
-            
-            # Upload audio
-            audio_url = self.upload_audio(temp_audio_path)
-            if not audio_url:
-                jobs[job_id]['status'] = 'error'
-                jobs[job_id]['error'] = 'Failed to upload audio'
-                return False
-            
             jobs[job_id]['status'] = 'transcribing'
             
-            # Transcribe
-            transcript_result = self.transcribe_audio(audio_url, job_id)
-            if not transcript_result or 'words' not in transcript_result:
+            # Transcribe using SDK
+            transcript = self.transcribe_audio(temp_audio_path, job_id)
+            if not transcript or not transcript.words:
                 # Error is set inside transcribe_audio
                 if not jobs[job_id].get('error'):
                     jobs[job_id]['status'] = 'error'
-                    jobs[job_id]['error'] = 'Failed to transcribe audio'
+                    jobs[job_id]['error'] = 'Failed to transcribe audio or no words found'
                 return False
             
             # Generate captioned video
             success = self.generate_captioned_video(
-                input_path, output_path, transcript_result['words'], job_id
+                input_path, output_path, transcript.words, job_id
             )
             
             if success:
@@ -311,10 +244,10 @@ class AutoCaptionGenerator:
             if temp_audio_path and os.path.exists(temp_audio_path):
                 os.unlink(temp_audio_path)
 
-def process_video_background(input_path, output_path, job_id):
-    """Background task to process video"""
-    generator = AutoCaptionGenerator(ASSEMBLYAI_API_KEY)
-    generator.process_video(input_path, output_path, job_id)
+def process_video_sync(input_path, output_path, job_id):
+    """Synchronous video processing"""
+    generator = AutoCaptionGenerator()
+    return generator.process_video(input_path, output_path, job_id)
 
 @app.route('/')
 def index():
@@ -346,22 +279,24 @@ def upload_video():
     
     # Initialize job status
     jobs[job_id] = {
-        'status': 'queued',
+        'status': 'processing',
         'created_at': datetime.now(),
         'input_file': filename,
         'output_file': None,
         'error': None
     }
     
-    # Start background processing
-    thread = threading.Thread(
-        target=process_video_background,
-        args=(input_path, output_path, job_id)
-    )
-    thread.daemon = True
-    thread.start()
-    
-    return jsonify({'job_id': job_id, 'status': 'processing started'})
+    # Process video synchronously
+    try:
+        success = process_video_sync(input_path, output_path, job_id)
+        if success:
+            return jsonify({'job_id': job_id, 'status': 'completed'})
+        else:
+            return jsonify({'job_id': job_id, 'status': 'error', 'error': jobs[job_id].get('error', 'Unknown error')})
+    except Exception as e:
+        jobs[job_id]['status'] = 'error'
+        jobs[job_id]['error'] = str(e)
+        return jsonify({'job_id': job_id, 'status': 'error', 'error': str(e)})
 
 @app.route('/status/<job_id>')
 def get_status(job_id):
@@ -419,13 +354,11 @@ def cleanup_old_files():
                     # Remove job from memory
                     del jobs[job_id]
 
-
         except Exception as e:
             print(f"Error during cleanup: {e}")
 
         # Sleep for an hour before running again
         time.sleep(3600)
-
 
 if __name__ == '__main__':
     # Start cleanup thread
